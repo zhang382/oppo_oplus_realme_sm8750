@@ -9,6 +9,11 @@ env:
 on:
   workflow_dispatch:
     inputs:
+      root_enable:
+        description: '是否集成 Root (KernelSU)，关闭后编译无 Root 纯净内核，并自动跳过 KSU/SUSFS/KPM 等相关步骤'
+        required: true
+        type: boolean
+        default: 'true'
       ksu_type:
         description: 'KernelSU分支(SukiSU Ultra/KernelSU Next/MKSU/KernelSU(原版),默认SukiSU Ultra)'
         required: true
@@ -89,7 +94,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     outputs:
-      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+      ksuver: ${{ steps.meta.outputs.ksuver }}
     steps:
       - name: 安装环境依赖+初始化源码仓库及llvm-Clang18工具链
         run: |
@@ -180,6 +185,7 @@ jobs:
 
       - name: 添加KernelSU
         id: ksu_version
+        if: inputs.root_enable
         run: |
           # 进入内核工作目录
           cd kernel_workspace
@@ -269,8 +275,18 @@ jobs:
             sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
           fi
 
+
+      - name: 生成 Root / KSU 版本输出
+        id: meta
+        run: |
+          if [[ "${{ inputs.root_enable }}" == "true" ]]; then
+            echo "ksuver=${{ steps.ksu_version.outputs.ksuver }}" >> $GITHUB_OUTPUT
+          else
+            echo "ksuver=NoRoot" >> $GITHUB_OUTPUT
+          fi
+
       - name: 应用 KernelSU & SUSFS 补丁
-        if: inputs.susfs_enable
+        if: inputs.root_enable && inputs.susfs_enable
         run: |
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
@@ -399,7 +415,7 @@ jobs:
           patch -p1 -F 3 < lz4kd.patch || true
           
       - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable
+        if: inputs.root_enable && inputs.susfs_enable
         run: |
           cd kernel_workspace
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -421,12 +437,18 @@ jobs:
       - name: 添加 KSU & 其他配置项
         run: |
           cd kernel_workspace
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          if [[ ${{ github.event.inputs.kpm_enable }} == 'true' && ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
-          if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
-            echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
+
+          ROOT_ENABLE="${{ inputs.root_enable }}"
+          if [[ "$ROOT_ENABLE" == "true" ]]; then
+            echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+            if [[ ${{ github.event.inputs.kpm_enable }} == 'true' && ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+              echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+            fi
+            if [[ "${{ github.event.inputs.susfs_enable }}" == "false" ]]; then
+              echo "CONFIG_KSU_SUSFS=n" >> ./common/arch/arm64/configs/gki_defconfig
+            fi
+          else
+            echo "Root 集成已关闭：跳过 CONFIG_KSU / KPM / SUSFS 相关配置"
           fi
           #添加对 Mountify (backslashxx/mountify) 模块的支持
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -446,7 +468,7 @@ jobs:
           echo "CONFIG_HEADERS_INSTALL=n" >> ./common/arch/arm64/configs/gki_defconfig
           
       - name: 启用网络功能增强优化配置
-        if: inputs.better_net
+        if: inputs.better_net == 'true'
         run: |
           cd kernel_workspace
           #启用  BPF 流解析器,实现高性能网络流量处理,增强网络监控和分析能力
@@ -672,6 +694,7 @@ jobs:
           df -h
          
       - name: 应用KPM并修补内核
+        if: inputs.root_enable
         run: |
           if [[ ${{ github.event.inputs.kpm_enable }} == 'true' && ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
             echo "正在应用KPM并修补内核..."
@@ -694,22 +717,29 @@ jobs:
             echo "未找到内核镜像文件，构建可能出错"
             exit 1
           fi
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            KSU_TYPENAME="SukiSU"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            KSU_TYPENAME="KSUNext"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
-            KSU_TYPENAME="MKSU"
+          ROOT_ENABLE="${{ inputs.root_enable }}"
+          if [[ "$ROOT_ENABLE" == "true" ]]; then
+            if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+              KSU_TYPENAME="SukiSU"
+            elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+              KSU_TYPENAME="KSUNext"
+            elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
+              KSU_TYPENAME="MKSU"
+            else
+              KSU_TYPENAME="KSU"
+            fi
+            ZIP_PREFIX="AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}"
           else
-            KSU_TYPENAME="KSU"
+            KSU_TYPENAME="NoRoot"
+            ZIP_PREFIX="AnyKernel3_${KSU_TYPENAME}"
           fi
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/refs/heads/main/zram.zip
           fi
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
-            zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ github.event.inputs.kernel_suffix }}.zip ./*
+            zip -r ../${ZIP_PREFIX}_${{ env.KERNEL_VERSION }}_A15_${{ github.event.inputs.kernel_suffix }}.zip ./*
           else
-            zip -r ../AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ env.KERNEL_NAME }}.zip ./*
+            zip -r ../${ZIP_PREFIX}_${{ env.KERNEL_VERSION }}_A15_${{ env.KERNEL_NAME }}.zip ./*
           fi
 
       - name: 上传 Ccache 调试日志
@@ -757,14 +787,19 @@ jobs:
           echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
           TAG_HEAD="OPPO+OPlus+Realme-A15-build"
           echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
-          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
-            KSU_TYPENAME="SukiSU Ultra"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
-            KSU_TYPENAME="KernelSU Next"
-          elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
-            KSU_TYPENAME="MKSU"
+          ROOT_ENABLE="${{ inputs.root_enable }}"
+          if [[ "$ROOT_ENABLE" == "true" ]]; then
+            if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+              KSU_TYPENAME="SukiSU Ultra"
+            elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+              KSU_TYPENAME="KernelSU Next"
+            elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
+              KSU_TYPENAME="MKSU"
+            else
+              KSU_TYPENAME="KernelSU"
+            fi
           else
-            KSU_TYPENAME="KSU"
+            KSU_TYPENAME="NoRoot"
           fi
           echo "KSU_TYPENAME=$KSU_TYPENAME" >> $GITHUB_ENV
          
@@ -780,8 +815,9 @@ jobs:
             - 编译时间: ${{ env.TIME_FORM }}
             - 机型：欧加真骁龙8Elite通用 6.6.66 内核（基于一加13 6.6.66 版官方OKI源码）
             - 特性：${{ env.KSU_TYPENAME }} + 风驰内核
-            - susfs支持：${{ github.event.inputs.susfs_enable }}
-            - KPM支持 (仅对sukisu生效)：${{ github.event.inputs.kpm_enable }}
+            - Root集成：${{ inputs.root_enable }}
+            - susfs支持：${{ inputs.root_enable && inputs.susfs_enable }}
+            - KPM支持 (仅对sukisu生效)：${{ inputs.root_enable && inputs.ksu_type == 'sukisu' && inputs.kpm_enable == 'true' }}
             - LZ4支持：${{ github.event.inputs.lz4_enable }}
             - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
             - 网络功能增强：${{ github.event.inputs.better_net }}
@@ -789,12 +825,12 @@ jobs:
             - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
             - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
             - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
-            - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
-            - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
-            - MKSU管理器下载：[Magic-KernelSU](https://github.com/5ec1cff/KernelSU/actions)
-            - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
+            ${{ inputs.root_enable && '- SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)' || '' }}
+            ${{ inputs.root_enable && '- KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)' || '' }}
+            ${{ inputs.root_enable && '- MKSU管理器下载：[Magic-KernelSU](https://github.com/5ec1cff/KernelSU/actions)' || '' }}
+            ${{ inputs.root_enable && '- KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)' || '' }}
             ### ⏫️ 更新内容：
-            - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
+            ${{ inputs.root_enable && format('- 更新{0}至最新版本（{1}）', env.KSU_TYPENAME, needs.build.outputs.ksuver) || '- 未集成 Root（NoRoot 构建）' }}
             - (预留)
             ### 📋 安装方法 | Installation Guide
             1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
